@@ -248,6 +248,9 @@ pub(super) struct Core<'a> {
     /// A member (or one queued) whose game started anew, until its new
     /// game is told the room: by then, or it loses the place (`rooms`).
     pub room_unseen: HashMap<u32, Instant>,
+    /// `SRP_DEV_REPLAY_AUTOPLAY` (dev only): games signed in, and when
+    /// their Play is pressed for them (`dev_autoplay`).
+    pub dev_autoplay: HashMap<SocketAddr, Instant>,
 }
 
 /// When a member waiting in its room while the room's match is played goes
@@ -313,6 +316,7 @@ impl<'a> Core<'a> {
             room_join_at: HashMap::new(),
             room_seen: HashMap::new(),
             room_unseen: HashMap::new(),
+            dev_autoplay: HashMap::new(),
         }
     }
 
@@ -741,6 +745,11 @@ impl<'a> Core<'a> {
             self.send_made(from, flush);
         }
         log::info!("{name} (account {account_id}) signed in to the lobby from {from}");
+        if self.settings.dev_replay && std::env::var_os("SRP_DEV_REPLAY_AUTOPLAY").is_some() {
+            // Its lobby movie loaded first: Play is pressed for it later.
+            self.dev_autoplay
+                .insert(from, now + std::time::Duration::from_secs(10));
+        }
 
         // What needs other accounts: the friend and ignore lists, which the
         // client never asks for, friend requests that waited, the squad.
@@ -952,6 +961,7 @@ impl<'a> Core<'a> {
         }
 
         self.check_matches(now);
+        self.dev_autoplay(now);
         self.log_predictions(now);
         self.collect_away(now);
         self.clan_matches(now);

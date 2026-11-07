@@ -788,6 +788,25 @@ impl Core<'_> {
         self.room_play(who, now);
     }
 
+    /// `SRP_DEV_REPLAY_AUTOPLAY` (dev only, with `SRP_DEV_REPLAY`): Play is
+    /// pressed for each game ten seconds after it signs in, for tests that
+    /// can't click the lobby.
+    pub(super) fn dev_autoplay(&mut self, now: Instant) {
+        let due: Vec<SocketAddr> = self
+            .dev_autoplay
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in due {
+            self.dev_autoplay.remove(&addr);
+            if let Some(who) = self.who(addr) {
+                let kit_id = who.account.locked().active_kit;
+                self.play_dev_replay(&who, kit_id, now);
+            }
+        }
+    }
+
     /// `SRP_DEV_REPLAY` (dev only): Play seats the player alone in a match
     /// of its own at once, no room and nobody else; the match server shows
     /// its game the recording instead (`match-server`'s `game/playback.rs`).

@@ -546,6 +546,10 @@ pub(crate) struct DevReplay {
     recording: Arc<Recording>,
     /// `SRP_DEV_REPLAY_LOCAL_PLACE` ([`Playback::local_place`]).
     local_place: u8,
+    /// `SRP_DEV_REPLAY_PLAY_LIVE`: a game seated by Play plays its match
+    /// (alone) instead of watching the recording: a control, whether a
+    /// match the lobby makes that way loads at all.
+    play_live: bool,
     /// The match port (0xE3), and the server's settings.
     port: u16,
     settings: Settings,
@@ -570,6 +574,7 @@ impl DevReplay {
                 .ok()
                 .and_then(|place| place.trim().parse().ok())
                 .unwrap_or(NO_LOCAL_PLACE),
+            play_live: std::env::var_os("SRP_DEV_REPLAY_PLAY_LIVE").is_some(),
             port,
             settings: settings.clone(),
             control: control.into(),
@@ -594,6 +599,12 @@ impl DevReplay {
     /// The addresses of the games shown the recording.
     pub(crate) fn addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.playbacks.keys().copied()
+    }
+
+    /// Whether a game seated by Play watches the recording
+    /// ([`DevReplay::play_live`]).
+    pub(crate) fn takes_play(&self) -> bool {
+        !self.play_live
     }
 
     pub(crate) fn owns(&self, addr: SocketAddr) -> bool {

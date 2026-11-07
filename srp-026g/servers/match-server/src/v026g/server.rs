@@ -452,6 +452,7 @@ impl Server {
             return;
         };
         if let Some(replay) = self.dev_replay.as_mut()
+            && replay.takes_play()
             && survarium::v026g::match_msgs::late_join::has_connect_capability(debug)
         {
             // Dev only: a seated player (the lobby seats one alone on Play,

@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
 
 use survarium::v026g::maps::MatchMap;
+use survarium::v026g::match_msgs::static_info::NO_LOCAL_PLACE;
 use survarium::v026g::match_msgs::static_info::{MatchOptions, SCORE_WEIGHTS, StaticInfo};
-use survarium::v026g::match_msgs::{PlayerInput, ServerMessage, TICK_MS, WireTime};
+use survarium::v026g::match_msgs::{PlayerInput, ServerMessage, TICK_MS, WireTime, id};
 
 use super::spectate::{SPECTATOR, SPECTATOR_ACCOUNT, watch};
 use super::*;
@@ -21,6 +22,9 @@ use crate::v026g::game::{Control, Speed};
 use crate::v026g::sur;
 
 const RECORDING: &str = "tests/data/replay_level_01_tdm_2p.sur";
+/// Files of the tests: each its own name.
+static FILES: AtomicU32 = AtomicU32::new(0);
+
 fn recording() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(RECORDING)
 }
@@ -49,7 +53,6 @@ fn playable() -> PathBuf {
         out.extend((bytes.len() as u32).to_le_bytes());
         out.extend(bytes);
     }
-    static FILES: AtomicU32 = AtomicU32::new(0);
     let path = std::env::temp_dir().join(format!(
         "srp-playback-{}-{}.sur",
         std::process::id(),
@@ -381,4 +384,118 @@ fn a_seated_player_is_shown_the_recording_and_its_seat_given_up() {
     assert!(relays_taken(&bench.clients[0]) > 0);
     assert!(!bench.server.games.contains_key(&bench.match_id));
     bench.assert_no_faults();
+}
+
+/// The messages (not the transport's own) the server sent a game before its
+/// 0xDA, in a recording: each id and its whole payload (a split message's
+/// parts put together).
+fn recorded_start(path: &std::path::Path, place: u8) -> Vec<(u8, Vec<u8>)> {
+    use crate::v026g::record;
+    use udp_transport::table::{Direction, Table};
+    let mut sent: Vec<(u8, Vec<u8>)> = Vec::new();
+    // A split message: its parts so far, and how many it has.
+    let mut parts: Vec<u8> = Vec::new();
+    let mut count = 0;
+    for r in record::read(path).unwrap() {
+        if r.place != place || !matches!(r.kind, record::IN | record::OUT) {
+            continue;
+        }
+        let direction = if r.kind == record::IN {
+            Direction::ToServer
+        } else {
+            Direction::ToClient
+        };
+        let datagram = udp_transport::wire::parse(Table::Match, direction, &r.bytes, 3).unwrap();
+        for message in datagram.messages.iter().filter(|m| !m.low_level) {
+            if r.kind == record::IN {
+                if message.id == survarium::v026g::match_msgs::id::READY {
+                    return sent;
+                }
+                continue;
+            }
+            parts.extend(message.payload);
+            let whole = match message.part {
+                None => true,
+                Some(part) => {
+                    count = part.count.unwrap_or(count);
+                    part.index + 1 == count
+                }
+            };
+            if whole {
+                sent.push((message.id, std::mem::take(&mut parts)));
+            }
+        }
+    }
+    panic!("place {place} never sent 0xDA");
+}
+
+/// What a game shown a recording gets before it loads is what the
+/// recorded game of a place got, byte for byte, but the place its 0xE4
+/// makes its own: the ports (0xE3), then the 0xE4, nothing else. The
+/// recording is one this server makes of a live match.
+#[test]
+fn a_spectator_gets_the_start_a_recorded_game_got() {
+    use crate::v026g::record;
+    let dir = std::env::temp_dir().join(format!(
+        "srp-playback-start-{}-{}",
+        std::process::id(),
+        FILES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let settings = Settings {
+        record: Some(record::RecordSettings {
+            dir: dir.clone(),
+            min_players: 2,
+            max_bytes: 1 << 24,
+            replays: None,
+        }),
+        ..Settings::default()
+    };
+    let mut live = Bench::growing(2, MAP_TDM, settings);
+    live.join_all();
+    live.run_long(12_000);
+    drop(live);
+    let closed = |path: &std::path::Path| {
+        path.extension().is_some_and(|ext| ext == "srprec")
+            && record::read(path).is_ok_and(|records| {
+                records.last().is_some_and(|last| {
+                    last.kind == record::NOTE && last.bytes.starts_with(b"{\"dropped\"")
+                })
+            })
+    };
+    let mut path = None;
+    for _ in 0..200 {
+        path = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| closed(path));
+        if path.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let path = path.expect("the live match's recording");
+    let recorded = recorded_start(&path, 0);
+    assert_eq!(
+        recorded.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [id::PORTS, id::STATIC_INFO]
+    );
+
+    let settings = Settings {
+        dev_replay: Some(path),
+        ..Settings::default()
+    };
+    let mut bench = Bench::growing(2, MAP_TDM, settings);
+    let at = watching(&mut bench);
+    let spectator = &bench.clients[at];
+    let before_world = spectator
+        .taken
+        .iter()
+        .take_while(|message| !matches!(message, ServerMessage::SetTime { .. }))
+        .map(|message| (message.id(), message.payload()))
+        .collect::<Vec<_>>();
+    let mut expected = recorded;
+    expected[1].1[0] = NO_LOCAL_PLACE;
+    assert_eq!(before_world, expected);
+    std::fs::remove_dir_all(dir).unwrap();
 }
