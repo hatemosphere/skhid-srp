@@ -406,8 +406,13 @@ impl Server {
     /// changed after the first datagram (a NAT), and nothing it sends gets
     /// through.
     fn log_stray(&mut self, addr: SocketAddr, len: usize) {
-        let placed = self.routes.keys().find(|other| other.ip() == addr.ip());
-        let Some(placed) = placed.copied() else {
+        let placed = self
+            .routes
+            .keys()
+            .copied()
+            .chain(self.dev_replay.iter().flat_map(DevReplay::addrs))
+            .find(|other| other.ip() == addr.ip());
+        let Some(placed) = placed else {
             return;
         };
         if self.strays_logged.len() >= STRAYS_KEPT {

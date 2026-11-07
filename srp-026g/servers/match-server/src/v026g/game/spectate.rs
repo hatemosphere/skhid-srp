@@ -150,6 +150,9 @@ pub(super) struct Watched<'a> {
     /// The match clock: the time its game is put at.
     pub(super) clock: u32,
     pub(super) info: &'a StaticInfo,
+    /// The place its 0xE4 makes its game's own: none
+    /// ([`NO_LOCAL_PLACE`]), but for a dev experiment (`playback`).
+    pub(super) local_place: u8,
     /// The places its static info names.
     pub(super) places: usize,
     /// The places its game must have before it starts from a world.
@@ -210,6 +213,7 @@ impl Game {
             id: self.id,
             clock,
             info: &self.formed.info,
+            local_place: NO_LOCAL_PLACE,
             places: self.formed.places.len(),
             roster: self.spectator_roster(),
             worlds: [self.snapshot.as_ref(), self.recent.as_ref()]
@@ -651,6 +655,21 @@ impl Spectator {
     }
 
     /// Its game has loaded its level (0xDA): it can be started from a world.
+    /// Its stage, for the log.
+    pub(super) fn stage(&self) -> String {
+        match self.stage {
+            Watch::Connecting => "Connecting".to_owned(),
+            Watch::Loading => "Loading".to_owned(),
+            Watch::Waiting => "Waiting".to_owned(),
+            Watch::Timing { time, echo, .. } => format!("Timing(world {time} ms, echo {echo})"),
+            Watch::Syncing { serial, time, .. } => {
+                format!("Syncing(world {time} ms, serial {serial})")
+            }
+            Watch::Live { from, wrong } => format!("Live(from {from} ms, {wrong} wrong)"),
+            Watch::Leaving { .. } => "Leaving".to_owned(),
+        }
+    }
+
     pub(super) fn has_loaded(&self) -> bool {
         !matches!(self.stage, Watch::Connecting | Watch::Loading)
     }
@@ -683,7 +702,17 @@ impl Spectator {
         match message {
             ClientMessage::PortProbe { .. } => {
                 if self.stage == Watch::Connecting {
-                    let info = watched.info.spectator_message();
+                    let info = watched
+                        .info
+                        .message(watched.local_place)
+                        .unwrap_or_else(|| watched.info.spectator_message());
+                    log::info!(
+                        "Match {:#x}: spectator {:#x} gets the 0xE4 of {} places, its own {:#04x}",
+                        watched.id,
+                        self.session_id,
+                        watched.places,
+                        watched.local_place
+                    );
                     let _ = self.transport.send(info.id(), &info.payload());
                     self.installed_roster = watched.places;
                     self.stage = Watch::Loading;

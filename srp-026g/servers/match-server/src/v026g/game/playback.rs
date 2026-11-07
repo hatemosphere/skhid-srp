@@ -22,7 +22,9 @@
 use std::path::Path;
 
 use survarium::v026g::match_msgs::static_info::{self, NO_LOCAL_PLACE, StaticInfo};
-use survarium::v026g::match_msgs::{PlayerInput, WireTime};
+use survarium::v026g::match_msgs::{PlayerInput, WireTime, mask_bytes};
+use udp_transport::table::{Direction, Table};
+use udp_transport::wire;
 
 use super::spectate::{Heard, Spectator, Watched};
 use super::*;
@@ -296,6 +298,10 @@ pub(crate) struct Playback {
     events: usize,
     created: Instant,
     settings: Settings,
+    /// `SRP_DEV_REPLAY_LOCAL_PLACE`: the place its 0xE4 makes its own
+    /// (none by default): an experiment, whether a game loads the match as
+    /// a player where it does not as a spectator.
+    local_place: u8,
 }
 
 impl Playback {
@@ -304,6 +310,7 @@ impl Playback {
         spectator: Spectator,
         came: Came,
         settings: Settings,
+        local_place: u8,
         now: Instant,
     ) -> Self {
         let at = recording.worlds[0].time;
@@ -318,6 +325,7 @@ impl Playback {
             events,
             created: now,
             settings,
+            local_place,
         }
     }
 
@@ -336,6 +344,7 @@ impl Playback {
             id: self.came.match_id(),
             clock,
             info: &recording.info,
+            local_place: self.local_place,
             places: usize::from(recording.info.roster()),
             roster: usize::from(recording.info.roster()),
             worlds: recording.worlds.iter().collect(),
@@ -349,13 +358,39 @@ impl Playback {
     /// A datagram of its game: `Some` once its game has left.
     fn receive(&mut self, datagram: &[u8], now: Instant) -> Option<Ended> {
         let recording = Arc::clone(&self.recording);
+        let session_id = self.spectator.session_id();
+        log::trace!(
+            "Replay {session_id:#x}: in {} bytes: {}",
+            datagram.len(),
+            messages(Direction::ToServer, datagram)
+        );
         for event in self.spectator.receive(datagram, now) {
             let Event::Message { id, payload } = event else {
+                log::info!("Replay {session_id:#x}: its game disconnected");
                 return Some(Ended::Left);
             };
+            let before = self.spectator.stage();
             let watched = self.watched(&recording, self.position(now));
-            match self.spectator.hear(&watched, id, &payload, now) {
-                Heard::Left => return Some(Ended::Left),
+            let heard = self.spectator.hear(&watched, id, &payload, now);
+            let after = self.spectator.stage();
+            if after != before {
+                log::debug!(
+                    "Replay {session_id:#x}: heard {id:#04x} ({} bytes): {before} -> {after}",
+                    payload.len()
+                );
+            } else if id == survarium::v026g::match_msgs::id::KEEP_ALIVE {
+                log::trace!("Replay {session_id:#x}: heard 0xe1 at {before}");
+            } else {
+                log::debug!(
+                    "Replay {session_id:#x}: heard {id:#04x} ({} bytes) at {before}",
+                    payload.len()
+                );
+            }
+            match heard {
+                Heard::Left => {
+                    log::info!("Replay {session_id:#x}: its game left (0xE0)");
+                    return Some(Ended::Left);
+                }
                 // It has every place from its 0xE4: nothing is installed.
                 Heard::Installed(_) | Heard::Nothing => {}
             }
@@ -412,9 +447,15 @@ impl Playback {
     /// Its turn: what came due goes, it is started from a world when it
     /// waits for one, and the end of the recording lets it go.
     fn poll(&mut self, now: Instant) -> (Vec<(SocketAddr, Vec<u8>)>, Option<Ended>) {
+        let session_id = self.spectator.session_id();
         if self.spectator.timed_out(&self.settings.timing, now) {
+            log::info!(
+                "Replay {session_id:#x}: its game sent nothing for too long at {}; forgotten",
+                self.spectator.stage()
+            );
             return (Vec::new(), Some(Ended::Left));
         }
+        let before = self.spectator.stage();
         if let Clock::Loading { at } = self.clock
             && self.spectator.has_loaded()
         {
@@ -455,7 +496,46 @@ impl Playback {
         let start = recording.world_for(at).time;
         self.spectator
             .step(&self.watched(&recording, at), Some(start), echo, now);
-        (self.spectator.poll(now), ended)
+        let after = self.spectator.stage();
+        if after != before {
+            log::debug!("Replay {session_id:#x}: {before} -> {after} at {at} ms");
+        }
+        let datagrams = self.spectator.poll(now);
+        for (_, datagram) in &datagrams {
+            log::trace!(
+                "Replay {session_id:#x}: out {} bytes: {}",
+                datagram.len(),
+                messages(Direction::ToClient, datagram)
+            );
+        }
+        (datagrams, ended)
+    }
+}
+
+/// A datagram's messages for the log: id, part and length.
+fn messages(direction: Direction, datagram: &[u8]) -> String {
+    match wire::parse(
+        Table::Match,
+        direction,
+        datagram,
+        mask_bytes(sur::MAX_PLAYERS as u8),
+    ) {
+        Ok(parsed) if parsed.messages.is_empty() => "acks only".to_owned(),
+        Ok(parsed) => parsed
+            .messages
+            .iter()
+            .map(|message| match message.part {
+                Some(part) => format!(
+                    "{:02X} part {} ({} bytes)",
+                    message.id,
+                    part.index,
+                    message.payload.len()
+                ),
+                None => format!("{:02X} ({} bytes)", message.id, message.payload.len()),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(error) => format!("unparsed: {error:?}"),
     }
 }
 
@@ -464,6 +544,8 @@ impl Playback {
 /// each, read and removed) go to all of them.
 pub(crate) struct DevReplay {
     recording: Arc<Recording>,
+    /// `SRP_DEV_REPLAY_LOCAL_PLACE` ([`Playback::local_place`]).
+    local_place: u8,
     /// The match port (0xE3), and the server's settings.
     port: u16,
     settings: Settings,
@@ -484,6 +566,10 @@ impl DevReplay {
         control.push(".control");
         Ok(Self {
             recording: Arc::new(recording),
+            local_place: std::env::var("SRP_DEV_REPLAY_LOCAL_PLACE")
+                .ok()
+                .and_then(|place| place.trim().parse().ok())
+                .unwrap_or(NO_LOCAL_PLACE),
             port,
             settings: settings.clone(),
             control: control.into(),
@@ -495,13 +581,19 @@ impl DevReplay {
     pub(crate) fn describe(&self) -> String {
         let recording = &self.recording;
         format!(
-            "{} places, {} ms, {} key frames, {} inputs; controls in {}",
+            "{} places, {} ms, {} key frames, {} inputs, its own place {:#04x}; controls in {}",
             recording.info.roster(),
             recording.end,
             recording.worlds.len(),
             recording.inputs.len(),
+            self.local_place,
             self.control.display()
         )
+    }
+
+    /// The addresses of the games shown the recording.
+    pub(crate) fn addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.playbacks.keys().copied()
     }
 
     pub(crate) fn owns(&self, addr: SocketAddr) -> bool {
@@ -536,6 +628,7 @@ impl DevReplay {
             spectator,
             came,
             self.settings.clone(),
+            self.local_place,
             now,
         );
         self.playbacks.insert(addr, playback);
