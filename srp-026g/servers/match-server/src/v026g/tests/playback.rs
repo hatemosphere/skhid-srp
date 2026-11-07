@@ -366,23 +366,36 @@ fn controls_read_as_written() {
 }
 
 /// The lobby's dev shortcut (`play_dev_replay`) seats a player alone on
-/// Play: its game is shown the recording as a spectator, and its seat is
-/// given up at once (no match is played here for it).
+/// Play: its game is shown the recording as a spectator. Its seat is kept
+/// while it watches (given up, the lobby would tell its loading game that
+/// its match is over: the stall of 2026-11-07), and the match is not given
+/// up as one nobody came to; both go once the game is done.
 #[test]
-fn a_seated_player_is_shown_the_recording_and_its_seat_given_up() {
+fn a_seated_player_watches_the_recording_on_its_seat_until_it_is_done() {
     let mut bench = bench();
     let session = session_of(0);
     bench.clients[0] = Client::idle_growing(session);
     bench.clients[0].connect();
     assert!(bench.until(1_000, |b| b.clients[0].model.options.is_some()));
     assert_eq!(bench.clients[0].model.local_index, None);
-    assert!(bench.registry.seat(session).is_none());
     bench.clients[0].ready();
     assert!(bench.until(5_000, |b| b.clients[0].model.is_synced()));
     assert_eq!(bench.clients[0].snapshots(), [(0, 50)]);
     bench.run_long(30_000);
     assert!(relays_taken(&bench.clients[0]) > 0);
     assert!(!bench.server.games.contains_key(&bench.match_id));
+    // Held past the time a match nobody came to is given up.
+    control(&mut bench, Control::Pause);
+    bench.run_long(Settings::default().timing.unstarted.as_millis() as u64);
+    assert!(bench.registry.seat(session).is_some());
+    assert!(bench.registry.formed(bench.match_id).is_some());
+    // The end: let go, then its seat.
+    control(&mut bench, Control::Seek(112_000));
+    control(&mut bench, Control::Play);
+    assert!(bench.until(5_000, |b| b.clients[0].told_to_leave));
+    assert!(bench.registry.seat(session).is_some());
+    bench.run_long(8_000);
+    assert!(bench.registry.seat(session).is_none());
     bench.assert_no_faults();
 }
 

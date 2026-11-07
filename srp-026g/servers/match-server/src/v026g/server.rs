@@ -279,8 +279,8 @@ impl Server {
         if let Some(replay) = self.dev_replay.as_mut()
             && replay.owns(addr)
         {
-            if let Some((session_id, ticket)) = replay.receive(addr, datagram, now) {
-                self.store.matchmaking().watcher_left(session_id, ticket);
+            if let Some((session_id, came)) = replay.receive(addr, datagram, now) {
+                dev_replay_left(&self.registry, &self.store, session_id, came);
             }
             return;
         }
@@ -456,19 +456,16 @@ impl Server {
             && survarium::v026g::match_msgs::late_join::has_connect_capability(debug)
         {
             // Dev only: a seated player (the lobby seats one alone on Play,
-            // `play_dev_replay`) watches the recording. Its seat is given
-            // up at once, as by a player who left by its own word: back in
-            // the lobby it is free, and nothing waits for it here.
-            if let Some(account_id) = self
+            // `play_dev_replay`) watches the recording; its seat is kept
+            // until it is done (`Came::Play`).
+            let account_id = self
                 .registry
                 .formed(seat.match_id)
                 .and_then(|formed| Some(formed.places.get(usize::from(seat.place))?.account_id))
-            {
-                self.store.matchmaking().leave_match(account_id);
-            }
-            self.registry.release(session_id);
+                .unwrap_or(0);
             let came = Came::Play {
                 match_id: seat.match_id,
+                account_id,
             };
             replay.connect(addr, session_id, came, transport, now);
             self.store.seen_in_match(session_id);
@@ -623,15 +620,16 @@ impl Server {
             self.results.match_ended(result);
         }
         if let Some(replay) = self.dev_replay.as_mut() {
-            let matchmaking = self.store.matchmaking();
+            let (registry, store) = (&self.registry, &self.store);
             datagrams.extend(replay.poll(
                 now,
                 |session_id, ticket| {
-                    matchmaking
+                    store
+                        .matchmaking()
                         .watched(session_id)
                         .is_some_and(|watcher| watcher.ticket == ticket)
                 },
-                |session_id, ticket| matchmaking.watcher_left(session_id, ticket),
+                |session_id, came| dev_replay_left(registry, store, session_id, came),
             ));
         }
         // A spectator gone from its game has no route.
@@ -688,6 +686,10 @@ impl Server {
         }
         for (match_id, formed_at) in self.registry.matches() {
             if !self.games.contains_key(&match_id)
+                && !self
+                    .dev_replay
+                    .as_ref()
+                    .is_some_and(|replay| replay.holds(match_id))
                 && now.saturating_duration_since(formed_at) >= self.settings.timing.unstarted
                 && let Some(formed) = self.registry.end(match_id)
             {
@@ -739,6 +741,20 @@ impl Server {
                         .collect(),
                 });
             }
+        }
+    }
+}
+
+/// `SRP_DEV_REPLAY`: a game shown the recording left it, or saw its end.
+/// A watcher is out of its room's queue; a game seated by Play gives its
+/// seat up, as a player who left by its own word (`Server::receive`), and
+/// the match nobody plays is given up as one nobody came to.
+fn dev_replay_left(registry: &MatchRegistry, store: &SessionStore, session_id: u32, came: Came) {
+    match came {
+        Came::Watch { ticket } => store.matchmaking().watcher_left(session_id, ticket),
+        Came::Play { account_id, .. } => {
+            registry.release(session_id);
+            store.matchmaking().leave_match(account_id);
         }
     }
 }

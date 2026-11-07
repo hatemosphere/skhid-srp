@@ -270,17 +270,22 @@ pub(crate) enum Came {
     /// spectate): let go when it watches no more, and out of its queue when
     /// it leaves or the recording ends.
     Watch { ticket: u32 },
-    /// It pressed Play (the lobby's dev shortcut) and was seated in the
-    /// match `match_id`, whose seat the server gave up at once: nothing of
-    /// the lobby's to keep or tell.
-    Play { match_id: u32 },
+    /// It pressed Play (the lobby's dev shortcut) and was seated, as
+    /// `account_id`, in the match `match_id`, which no game plays here. The
+    /// seat is kept while it watches: given up, the lobby would tell its
+    /// game the match is over (`85` lobby state, its results), and a game
+    /// told that while it loads never ends its load (seen 2026-11-07). The
+    /// match is not given up as one nobody came to meanwhile
+    /// ([`DevReplay::holds`]); its seat is given up when the game leaves or
+    /// the recording ends.
+    Play { match_id: u32, account_id: u32 },
 }
 
 impl Came {
     fn match_id(self) -> u32 {
         match self {
             Self::Watch { ticket } => ticket,
-            Self::Play { match_id } => match_id,
+            Self::Play { match_id, .. } => match_id,
         }
     }
 }
@@ -645,14 +650,14 @@ impl DevReplay {
         self.playbacks.insert(addr, playback);
     }
 
-    /// A datagram of the game at `addr`: the session and the lobby's match
-    /// of a watcher that left by itself, to take out of its queue.
+    /// A datagram of the game at `addr`: the session of a game that left by
+    /// itself, and how it came, for the lobby to be told.
     pub(crate) fn receive(
         &mut self,
         addr: SocketAddr,
         datagram: &[u8],
         now: Instant,
-    ) -> Option<(u32, u32)> {
+    ) -> Option<(u32, Came)> {
         let playback = self.playbacks.get_mut(&addr)?;
         // One let go is silent until it is forgotten.
         if playback.spectator.is_leaving() {
@@ -660,10 +665,15 @@ impl DevReplay {
         }
         playback.receive(datagram, now)?;
         let playback = self.playbacks.remove(&addr)?;
-        match playback.came {
-            Came::Watch { ticket } => Some((playback.spectator.session_id(), ticket)),
-            Came::Play { .. } => None,
-        }
+        Some((playback.spectator.session_id(), playback.came))
+    }
+
+    /// Whether a game seated in the match `match_id` watches the recording
+    /// (or is being let go).
+    pub(crate) fn holds(&self, match_id: u32) -> bool {
+        self.playbacks.values().any(
+            |playback| matches!(playback.came, Came::Play { match_id: id, .. } if id == match_id),
+        )
     }
 
     pub(crate) fn control(&mut self, control: Control, now: Instant) {
@@ -674,13 +684,13 @@ impl DevReplay {
 
     /// Each playback's turn. `watching` says whether a session still
     /// watches a match (the lobby's; a watcher that does not is let go);
-    /// `left` hears of each watcher whose game left or saw the end, to take
-    /// it out of its queue.
+    /// `left` hears of each game that left or saw the end, and how it came,
+    /// for the lobby to be told.
     pub(crate) fn poll(
         &mut self,
         now: Instant,
         watching: impl Fn(u32, u32) -> bool,
-        mut left: impl FnMut(u32, u32),
+        mut left: impl FnMut(u32, Came),
     ) -> Vec<(SocketAddr, Vec<u8>)> {
         if now >= self.next_control {
             self.next_control = now + CONTROL_EVERY;
@@ -702,12 +712,16 @@ impl DevReplay {
             }
             let (out, ended) = playback.poll(now);
             datagrams.extend(out);
-            if let Some(ticket) = ticket
-                && ended.is_some()
-            {
-                left(session_id, ticket);
+            let kept = ended != Some(Ended::Left) && !playback.spectator.is_forgotten(now);
+            // A watcher is out of its queue at once; a seat goes once the
+            // game is gone (its farewell taken, or its silence over), so the
+            // lobby tells it nothing while it is in the match.
+            match playback.came {
+                Came::Watch { .. } if ended.is_some() => left(session_id, playback.came),
+                Came::Play { .. } if !kept => left(session_id, playback.came),
+                Came::Watch { .. } | Came::Play { .. } => {}
             }
-            ended != Some(Ended::Left) && !playback.spectator.is_forgotten(now)
+            kept
         });
         datagrams
     }
