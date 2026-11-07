@@ -16,7 +16,7 @@ use survarium::v026g::match_msgs::{ClientMessage, id, parse_client};
 use udp_transport::{Config, Event, PacketLog, Table, Transport};
 
 use super::Settings;
-use super::game::{Game, SpectatorAt};
+use super::game::{DevReplay, Game, SpectatorAt};
 use super::record::{Desk, Recorder};
 use super::registry::{MatchEnd, MatchRegistry, MatchResult, PlayerResult, ResultsSink};
 
@@ -193,6 +193,8 @@ pub(crate) struct Server {
     /// Each spectator's match (Queue and spectate): no roster place
     /// (`game::spectate`).
     spectator_routes: HashMap<SocketAddr, u32>,
+    /// `SRP_DEV_REPLAY` (dev only): the spectators shown a recording.
+    pub(crate) dev_replay: Option<DevReplay>,
     /// Addresses already logged as sending without being placed.
     strays_logged: HashSet<SocketAddr>,
     /// The addresses that send without being placed or connecting, while
@@ -235,12 +237,29 @@ impl Server {
                 }
             }
         });
+        let dev_replay = settings.dev_replay.as_ref().and_then(|path| {
+            match DevReplay::load(path, port, &settings, now) {
+                Ok(replay) => {
+                    log::warn!(
+                        "SRP_DEV_REPLAY: every spectator is shown {} ({})",
+                        path.display(),
+                        replay.describe()
+                    );
+                    Some(replay)
+                }
+                Err(error) => {
+                    log::error!("SRP_DEV_REPLAY: can't play {}: {error}", path.display());
+                    None
+                }
+            }
+        });
         Self {
             port,
             registry,
             store,
             results,
             settings,
+            dev_replay,
             packet_log: None,
             recorder,
             games: HashMap::new(),
@@ -257,6 +276,14 @@ impl Server {
     }
 
     pub fn receive(&mut self, addr: SocketAddr, datagram: &[u8], now: Instant) {
+        if let Some(replay) = self.dev_replay.as_mut()
+            && replay.owns(addr)
+        {
+            if let Some((session_id, ticket)) = replay.receive(addr, datagram, now) {
+                self.store.matchmaking().watcher_left(session_id, ticket);
+            }
+            return;
+        }
         if let Some(&match_id) = self.spectator_routes.get(&addr) {
             let registry = &self.registry;
             if let Some(game) = self.games.get_mut(&match_id) {
@@ -401,6 +428,13 @@ impl Server {
         };
         let Some(seat) = self.registry.seat(session_id) else {
             if let Some(watcher) = self.store.matchmaking().watched(session_id) {
+                if let Some(replay) = self.dev_replay.as_mut()
+                    && survarium::v026g::match_msgs::late_join::has_connect_capability(debug)
+                {
+                    replay.connect(addr, session_id, watcher.ticket, transport, now);
+                    self.store.seen_in_match(session_id);
+                    return;
+                }
                 self.connect_spectator(addr, session_id, watcher.ticket, debug, transport, now);
                 return;
             }
@@ -556,6 +590,18 @@ impl Server {
             // And may press Play again while this match lingers.
             self.registry.free_seats(result.match_id);
             self.results.match_ended(result);
+        }
+        if let Some(replay) = self.dev_replay.as_mut() {
+            let matchmaking = self.store.matchmaking();
+            datagrams.extend(replay.poll(
+                now,
+                |session_id, ticket| {
+                    matchmaking
+                        .watched(session_id)
+                        .is_some_and(|watcher| watcher.ticket == ticket)
+                },
+                |session_id, ticket| matchmaking.watcher_left(session_id, ticket),
+            ));
         }
         // A spectator gone from its game has no route.
         let games = &self.games;

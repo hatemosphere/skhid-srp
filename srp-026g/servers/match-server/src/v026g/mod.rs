@@ -266,6 +266,10 @@ pub(crate) struct Settings {
     /// `SRP_MAPDATA_DIR`: the bots' maps, shared by every match.
     pub maps: Option<Arc<bots::maps::Maps>>,
     pub timing: Timing,
+    /// `SRP_DEV_REPLAY` (dev only): a recording (`.sur` or `.srprec`) every
+    /// spectator is shown instead of the match it asked to watch
+    /// (`game::playback`).
+    pub dev_replay: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -282,6 +286,7 @@ impl Default for Settings {
             pack: Config::for_table(Table::Match).gather,
             maps: None,
             timing: Timing::default(),
+            dev_replay: None,
         }
     }
 }
@@ -381,6 +386,9 @@ impl Settings {
                     ..Timing::default()
                 }
             },
+            dev_replay: var("SRP_DEV_REPLAY")
+                .filter(|path| !path.trim().is_empty())
+                .map(PathBuf::from),
         }
     }
 }
