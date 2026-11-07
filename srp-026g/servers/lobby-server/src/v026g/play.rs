@@ -760,6 +760,10 @@ impl Core<'_> {
         // A match that ended without a word frees its seats first: Play
         // would send the player back to it.
         self.check_matches(now);
+        if self.settings.dev_replay {
+            self.play_dev_replay(who, kit_id, now);
+            return;
+        }
         if let Some(held) = pvb_hold {
             if held.until > now {
                 self.play_vs_bots(who, kit_id, held, now);
@@ -782,6 +786,49 @@ impl Core<'_> {
             return;
         }
         self.room_play(who, now);
+    }
+
+    /// `SRP_DEV_REPLAY` (dev only): Play seats the player alone in a match
+    /// of its own at once, no room and nobody else; the match server shows
+    /// its game the recording instead (`match-server`'s `game/playback.rs`).
+    fn play_dev_replay(&mut self, who: &Who, kit_id: u32, now: Instant) {
+        if self.back_to_seat(who.addr, now) {
+            return;
+        }
+        let Some(pool) = self.pool_for_sessions([who.session_id]) else {
+            return;
+        };
+        let player = session::Player {
+            session_id: who.session_id,
+            account_id: who.account_id,
+            profile_id: kit_id,
+        };
+        if self
+            .store
+            .matchmaking()
+            .seat_solo(player, 0, now, pool)
+            .is_none()
+        {
+            self.deny(who.addr, id::PLAY, PLAY_KIT);
+            return;
+        }
+        if let Some(account) = self.store.account(who.account_id) {
+            account.locked().play = Some(player);
+        }
+        let order_id = self.next_order_id;
+        // 0xFFFFFFFF is the client's "not queued".
+        self.next_order_id = (self.next_order_id + 1) % 0x7FFF_FFFF + 1;
+        if let Some(state) = self.player_mut(who.addr) {
+            state.queued_since = Some(now);
+            state.order_id = order_id;
+        }
+        log::warn!(
+            "{} pressed Play: SRP_DEV_REPLAY, sent to watch the recording",
+            who.name
+        );
+        // "Match found" and where the match server is (0x82): the match is
+        // made on the way (`launch`).
+        self.queue_status(who.addr, now);
     }
 
     /// A player with a place in a match (it closed the match early, or

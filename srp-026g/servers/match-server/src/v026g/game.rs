@@ -137,7 +137,7 @@ mod playback;
 mod spectate;
 mod start;
 use late_join::{Admission, LoadingProfile};
-pub(crate) use playback::DevReplay;
+pub(crate) use playback::{Came, DevReplay};
 #[cfg(test)]
 pub(crate) use playback::{Control, Speed};
 pub(crate) use spectate::SpectatorAt;

@@ -74,7 +74,14 @@ replay plays in the running game (lobby -> replay -> lobby, no second process).
 
 ## How to try it
 
-On the dev server: `SRP_DEV_REPLAY=/tmp/srp-local/recordings/<file>.srprec`, a room whose match
-runs, "Queue and spectate" with a patched game (#1285's patch 103). Then, for example,
-`echo "seek 60" > /tmp/srp-local/recordings/<file>.srprec.control`. The game must run the same
-simulation as the recording (`simulation_changes.tsv`).
+On the dev server: `SRP_DEV_REPLAY=/tmp/srp-local/recordings/<file>.srprec` (the lobby and the
+match server read it). Then either:
+- **Play** (the stock lobby's): the lobby seats the player alone in a match of its own at once
+  (`play_dev_replay`: no room, nobody else), and the match server, instead of starting that
+  match, gives the seat up and shows the game the recording as a spectator;
+- or "Queue and spectate" in a room whose match runs (#1285's lobby movie).
+
+The game needs #1285's patch 103 (no place of its own, the 0xEA naming 0xFF). Controls, for
+example: `echo "seek 60" > /tmp/srp-local/recordings/<file>.srprec.control`. The game should run
+the same simulation as the recording (`simulation_changes.tsv`): best, a match recorded with the
+same exe.

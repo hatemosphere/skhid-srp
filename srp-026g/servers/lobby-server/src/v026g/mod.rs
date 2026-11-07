@@ -198,6 +198,9 @@ pub struct Settings {
     pub pvb: pvb::Config,
     /// Rooms (`RoomRules::rooms_most`, `SRP_ROOMS_EXTRA_MAPS`; `rooms`).
     pub rooms: rooms::Config,
+    /// `SRP_DEV_REPLAY` (dev only): Play seats the player alone at once, and
+    /// the match server shows its game a recording (`play_dev_replay`).
+    pub dev_replay: bool,
 }
 
 impl Settings {
@@ -299,6 +302,7 @@ impl Settings {
         Self {
             pvb: pvb::Config::from_env(),
             rooms: rooms::Config::from_env(),
+            dev_replay: std::env::var("SRP_DEV_REPLAY").is_ok_and(|path| !path.trim().is_empty()),
             balance,
             min_patch_revision,
             bind: config.bind_addr(),
@@ -328,6 +332,7 @@ impl Settings {
             balance: Weights::default(),
             pvb: pvb::Config::default(),
             rooms: rooms::Config::default(),
+            dev_replay: false,
         }
     }
 }

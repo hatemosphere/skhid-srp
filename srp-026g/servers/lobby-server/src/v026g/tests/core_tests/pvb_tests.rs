@@ -468,3 +468,27 @@ fn a_level_15_player_plays_level_15_bots_in_the_top_players_kits() {
             .all(|&each| each == session::v026g::level_stats::BOT_STRENGTH)
     );
 }
+
+/// `SRP_DEV_REPLAY` (dev only): Play seats the player alone at once, with
+/// no room and no bots; the match server shows its game the recording.
+#[test]
+fn dev_replay_play_sends_a_player_alone_to_a_match_at_once() {
+    let mut settings = Settings::local("127.0.0.1:0");
+    settings.dev_replay = true;
+    let mut world = World::with_settings(settings);
+    let alice = world.connect("Alice");
+    world.take(alice);
+    world.ask(alice, request::play(1));
+    world.advance(Duration::from_secs(1));
+    let decoded = world.take(alice);
+    assert_eq!(denial(&decoded, 0x2F), None);
+    let (ticket, _) = sent_to_match(&decoded).expect("sent to a match");
+    let made = world.host.made.locked();
+    let (id, setup) = made.last().unwrap();
+    assert_eq!(*id, ticket);
+    assert!(!setup.vs_bots);
+    assert_eq!(setup.players.len(), 1);
+    assert_eq!(setup.players[0].account_id, world.ids[alice].0);
+    drop(made);
+    assert!(world.core.rooms.of(world.ids[alice].0).is_none());
+}

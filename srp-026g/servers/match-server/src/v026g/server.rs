@@ -16,7 +16,7 @@ use survarium::v026g::match_msgs::{ClientMessage, id, parse_client};
 use udp_transport::{Config, Event, PacketLog, Table, Transport};
 
 use super::Settings;
-use super::game::{DevReplay, Game, SpectatorAt};
+use super::game::{Came, DevReplay, Game, SpectatorAt};
 use super::record::{Desk, Recorder};
 use super::registry::{MatchEnd, MatchRegistry, MatchResult, PlayerResult, ResultsSink};
 
@@ -431,7 +431,10 @@ impl Server {
                 if let Some(replay) = self.dev_replay.as_mut()
                     && survarium::v026g::match_msgs::late_join::has_connect_capability(debug)
                 {
-                    replay.connect(addr, session_id, watcher.ticket, transport, now);
+                    let came = Came::Watch {
+                        ticket: watcher.ticket,
+                    };
+                    replay.connect(addr, session_id, came, transport, now);
                     self.store.seen_in_match(session_id);
                     return;
                 }
@@ -443,6 +446,28 @@ impl Server {
             self.pending.insert(addr, transport);
             return;
         };
+        if let Some(replay) = self.dev_replay.as_mut()
+            && survarium::v026g::match_msgs::late_join::has_connect_capability(debug)
+        {
+            // Dev only: a seated player (the lobby seats one alone on Play,
+            // `play_dev_replay`) watches the recording. Its seat is given
+            // up at once, as by a player who left by its own word: back in
+            // the lobby it is free, and nothing waits for it here.
+            if let Some(account_id) = self
+                .registry
+                .formed(seat.match_id)
+                .and_then(|formed| Some(formed.places.get(usize::from(seat.place))?.account_id))
+            {
+                self.store.matchmaking().leave_match(account_id);
+            }
+            self.registry.release(session_id);
+            let came = Came::Play {
+                match_id: seat.match_id,
+            };
+            replay.connect(addr, session_id, came, transport, now);
+            self.store.seen_in_match(session_id);
+            return;
+        }
         if !self.games.contains_key(&seat.match_id) {
             let Some(formed) = self.registry.formed(seat.match_id) else {
                 log::error!(

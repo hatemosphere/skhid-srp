@@ -261,12 +261,33 @@ pub(crate) enum Ended {
     Over,
 }
 
+/// How a game came to be shown the recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Came {
+    /// Its session watches the lobby's match `ticket` (Queue and
+    /// spectate): let go when it watches no more, and out of its queue when
+    /// it leaves or the recording ends.
+    Watch { ticket: u32 },
+    /// It pressed Play (the lobby's dev shortcut) and was seated in the
+    /// match `match_id`, whose seat the server gave up at once: nothing of
+    /// the lobby's to keep or tell.
+    Play { match_id: u32 },
+}
+
+impl Came {
+    fn match_id(self) -> u32 {
+        match self {
+            Self::Watch { ticket } => ticket,
+            Self::Play { match_id } => match_id,
+        }
+    }
+}
+
 /// One spectator's game shown a recording.
 pub(crate) struct Playback {
     recording: Arc<Recording>,
     spectator: Spectator,
-    /// The match it asked to watch.
-    ticket: u32,
+    came: Came,
     clock: Clock,
     speed: Speed,
     /// How many of the recording's inputs and roster changes have gone to
@@ -281,7 +302,7 @@ impl Playback {
     fn new(
         recording: Arc<Recording>,
         spectator: Spectator,
-        ticket: u32,
+        came: Came,
         settings: Settings,
         now: Instant,
     ) -> Self {
@@ -290,7 +311,7 @@ impl Playback {
         Self {
             recording,
             spectator,
-            ticket,
+            came,
             clock: Clock::Loading { at },
             speed: Speed::Normal,
             inputs,
@@ -312,7 +333,7 @@ impl Playback {
 
     fn watched<'a>(&self, recording: &'a Recording, clock: u32) -> Watched<'a> {
         Watched {
-            id: self.ticket,
+            id: self.came.match_id(),
             clock,
             info: &recording.info,
             places: usize::from(recording.info.roster()),
@@ -487,19 +508,19 @@ impl DevReplay {
         self.playbacks.contains_key(&addr)
     }
 
-    /// The game at `addr` of `session_id`, which asked to watch the match
-    /// `ticket`, is shown the recording instead.
+    /// The game at `addr` of `session_id` is shown the recording as a
+    /// spectator, in place of what its session `came` by.
     pub(crate) fn connect(
         &mut self,
         addr: SocketAddr,
         session_id: u32,
-        ticket: u32,
+        came: Came,
         transport: Transport,
         now: Instant,
     ) {
         log::info!(
-            "Replay: spectator {session_id:#x} at {addr} (asked for match {ticket:#x}) is shown \
-             the recording"
+            "Replay: the game of session {session_id:#x} at {addr} ({came:?}) is shown the \
+             recording"
         );
         self.playbacks
             .retain(|_, playback| playback.spectator.session_id() != session_id);
@@ -513,15 +534,15 @@ impl DevReplay {
         let playback = Playback::new(
             Arc::clone(&self.recording),
             spectator,
-            ticket,
+            came,
             self.settings.clone(),
             now,
         );
         self.playbacks.insert(addr, playback);
     }
 
-    /// A datagram of the game at `addr`: the session and match of one that
-    /// left by itself, to take out of its queue.
+    /// A datagram of the game at `addr`: the session and the lobby's match
+    /// of a watcher that left by itself, to take out of its queue.
     pub(crate) fn receive(
         &mut self,
         addr: SocketAddr,
@@ -535,7 +556,10 @@ impl DevReplay {
         }
         playback.receive(datagram, now)?;
         let playback = self.playbacks.remove(&addr)?;
-        Some((playback.spectator.session_id(), playback.ticket))
+        match playback.came {
+            Came::Watch { ticket } => Some((playback.spectator.session_id(), ticket)),
+            Came::Play { .. } => None,
+        }
     }
 
     pub(crate) fn control(&mut self, control: Control, now: Instant) {
@@ -545,9 +569,9 @@ impl DevReplay {
     }
 
     /// Each playback's turn. `watching` says whether a session still
-    /// watches a match (the lobby's; one that does not is let go);
-    /// `left` hears of each game that left or saw the end, to take it out
-    /// of its queue.
+    /// watches a match (the lobby's; a watcher that does not is let go);
+    /// `left` hears of each watcher whose game left or saw the end, to take
+    /// it out of its queue.
     pub(crate) fn poll(
         &mut self,
         now: Instant,
@@ -561,14 +585,23 @@ impl DevReplay {
         let mut datagrams = Vec::new();
         self.playbacks.retain(|_, playback| {
             let session_id = playback.spectator.session_id();
-            if !playback.spectator.is_leaving() && !watching(session_id, playback.ticket) {
+            let ticket = match playback.came {
+                Came::Watch { ticket } => Some(ticket),
+                Came::Play { .. } => None,
+            };
+            if let Some(ticket) = ticket
+                && !playback.spectator.is_leaving()
+                && !watching(session_id, ticket)
+            {
                 let at = playback.position(now);
                 playback.spectator.farewell(at, now);
             }
             let (out, ended) = playback.poll(now);
             datagrams.extend(out);
-            if ended.is_some() {
-                left(session_id, playback.ticket);
+            if let Some(ticket) = ticket
+                && ended.is_some()
+            {
+                left(session_id, ticket);
             }
             ended != Some(Ended::Left) && !playback.spectator.is_forgotten(now)
         });

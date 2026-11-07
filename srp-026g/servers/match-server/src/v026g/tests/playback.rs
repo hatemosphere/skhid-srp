@@ -361,3 +361,24 @@ fn controls_read_as_written() {
         assert_eq!(Control::parse(wrong), None, "{wrong}");
     }
 }
+
+/// The lobby's dev shortcut (`play_dev_replay`) seats a player alone on
+/// Play: its game is shown the recording as a spectator, and its seat is
+/// given up at once (no match is played here for it).
+#[test]
+fn a_seated_player_is_shown_the_recording_and_its_seat_given_up() {
+    let mut bench = bench();
+    let session = session_of(0);
+    bench.clients[0] = Client::idle_growing(session);
+    bench.clients[0].connect();
+    assert!(bench.until(1_000, |b| b.clients[0].model.options.is_some()));
+    assert_eq!(bench.clients[0].model.local_index, None);
+    assert!(bench.registry.seat(session).is_none());
+    bench.clients[0].ready();
+    assert!(bench.until(5_000, |b| b.clients[0].model.is_synced()));
+    assert_eq!(bench.clients[0].snapshots(), [(0, 50)]);
+    bench.run_long(30_000);
+    assert!(relays_taken(&bench.clients[0]) > 0);
+    assert!(!bench.server.games.contains_key(&bench.match_id));
+    bench.assert_no_faults();
+}
